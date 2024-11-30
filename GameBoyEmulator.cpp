@@ -36,56 +36,39 @@ void error_callback(int error, const char* description)
     fprintf(stderr, "Error: %s\n", description);
 }
 
-void processInput(GLFWwindow* window, CPU* cpu)
-{
-    // Start with all buttons unpressed
-    uint8_t directionState = 0x0F; // Direction buttons (bits 0-3 set to 1)
-    uint8_t actionState = 0x0F;    // Action buttons (bits 4-7 set to 1)
+void processInput(GLFWwindow* window, CPU* cpu) {
+    // Initialize Joypad states
+    cpu->directionState = 0x0F; // Direction buttons (bits 0-3 set to 1)
+    cpu->actionState = 0x0F;    // Action buttons (bits 0-3 set to 1)
 
     // Check Direction keys (Right, Left, Up, Down)
     if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
-        directionState &= ~0x01; // Right button (bit 0)
+        cpu->actionState &= ~0x01; // Right button (bit 0)
     }
     if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
-        directionState &= ~0x02; // Left button (bit 1)
+        cpu->actionState &= ~0x02; // Left button (bit 1)
     }
     if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) {
-        directionState &= ~0x04; // Up button (bit 2)
+        cpu->actionState &= ~0x04; // Up button (bit 2)
     }
     if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) {
-        directionState &= ~0x08; // Down button (bit 3)
+        cpu->actionState &= ~0x08; // Down button (bit 3)
     }
 
-    // Check Action keys (A button, Select button)
+    // Check Action keys (A, B, Select, Start)
     if (glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS) {
-        actionState &= ~0x01; // A button (bit 0 in action state)
+        cpu->directionState &= ~0x01; // A button (bit 0)
+    }
+    if (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS) {
+        cpu->directionState &= ~0x02; // B button (bit 1)
     }
     if (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) {
-        actionState &= ~0x02; // Select button (bit 1 in action state)
+        cpu->directionState &= ~0x04; // Select button (bit 2)
     }
-
-    // Grab the state of select bits 4 and 5 separately
-    bool selectAction = !(cpu->ram[0xFF00] & 0x10); // Bit 4 (0x10)
-    bool selectDirection = !(cpu->ram[0xFF00] & 0x20); // Bit 5 (0x20)
-
-    // Start with all buttons unpressed in the new joypad state
-    uint8_t newJoypadState = 0xFF;
-
-    // Determine which set of buttons to send (directional or action)
-    if (selectAction && !selectDirection) {
-        // Action buttons selected (bit 4 is 0)
-        cpu->ram[0xFF00] = actionState; // Set action button state
-    }
-    else if (selectDirection && !selectAction) {
-        // Direction buttons selected (bit 5 is 0)
-        cpu->ram[0xFF00] = directionState;// Set direction button state
-    }
-
-    if (newJoypadState != cpu->ram[0xFF00]) {
-        cpu->ram[0xFF0F] |= 0x10; // Trigger Joypad interrupt if state changed
+    if (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS) {
+        cpu->directionState &= ~0x08; // Start button (bit 3)
     }
 }
-
 
 void checkCompileErrors(GLuint shader, std::string type) {
     GLint success;
@@ -198,7 +181,7 @@ void inithwreg(CPU* cpu)
     cpu->ram[0xFF49] = 0xFF; // OBP1 - Object Palette 1 Data
     cpu->ram[0xFF4A] = 0x00; // WY - Window Y Position
     cpu->ram[0xFF4B] = 0x00; // WX - Window X Position
-
+    cpu->ram[0xFFFF] |= 0x10;
     //cpu->ram[0xFFFF] = 0x00; // IE - Interrupt Enable
 }
 
@@ -296,7 +279,8 @@ void load_ram(CPU& cpu, char const* filename, bool use_only_boot_rom, bool overw
     std::copy(vec.begin(), vec.end(), cpu.full_rom.begin());
 
     // Initialize external RAM to zero or load from a save file if needed
-    cpu.full_ram.resize(0x8000, 0);  // Up to 32KB of RAM
+    //cpu.full_ram.resize(0x8000, 0);  // Up to 32KB of RAM
+    
 
     if (!use_only_boot_rom) {
         // Load the boot ROM
@@ -318,6 +302,10 @@ void load_ram(CPU& cpu, char const* filename, bool use_only_boot_rom, bool overw
             cpu.ram[i] = cpu.full_rom[i];
         }
     }
+
+    printf("Loaded ROM size: %lu bytes\n", cpu.full_rom.size());
+    cpu.parseROMHeader();
+    return;
 }
 
 void dump_ram(const CPU& cpu, const std::string& filename)
@@ -407,7 +395,7 @@ int main()
 
     bool logging_enabled = false;
     bool runbootrom = false;
-    const char* romname = "tetris.gb";
+    const char* romname = "opus5.gb";
     load_ram(cpu, romname, !runbootrom, !runbootrom);
 
     if (!runbootrom)
@@ -474,8 +462,8 @@ int main()
     ImGui_ImplGlfw_InitForOpenGL(window, true);          // Second param install_callback=true will install GLFW callbacks and chain to existing ones.
     ImGui_ImplOpenGL3_Init();
 
-    std::ofstream logFile("logfile.txt");
-    logFile.clear();
+    /*std::ofstream logFile("logfile.txt");
+    logFile.clear();*/
 
     byte h = cpu.h;
     byte l = cpu.l;
@@ -509,7 +497,7 @@ int main()
 
         uint16_t pc = cpu.pc;
 
-        if (logFile.is_open())
+        /*if (logFile.is_open())
         {
             logFile << "A:" << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << static_cast<int>(cpu.a) << " ";
             uint8_t flags = 0;
@@ -531,7 +519,7 @@ int main()
             logFile << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << static_cast<int>(cpu.ram[pc + 0x02]) << ",";
             logFile << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << static_cast<int>(cpu.ram[pc + 0x03]) << "\n";
 
-        }
+        }*/
 
         int ret = 0;
 
@@ -582,8 +570,8 @@ int main()
 
                 if (cpu.deferredIME)
                 {
-                    cpu.deferredIMECycles++;
-                    if (cpu.deferredIMECycles == defCycles)
+                    cpu.deferredIMECycles--;
+                    if (cpu.deferredIMECycles <= 0)
                     {
                         cpu.IME_flag = true;
                         cpu.deferredIME = false;
@@ -611,11 +599,12 @@ int main()
 
                 if (cpu.deferredIME)
                 {
-                    cpu.deferredIMECycles++;
-                    if (cpu.deferredIMECycles == defCycles)
+                    cpu.deferredIMECycles--;
+                    if (cpu.deferredIMECycles <= 0)
                     {
                         cpu.IME_flag = true;
                         cpu.deferredIME = false;
+                        //printf("IME enabled after deferred cycles\n");
                     }
                 }
             }
@@ -729,7 +718,7 @@ int main()
         updateTimer(&cpu, ret);
         handleInterrupts(&cpu);
     }
-    logFile.close();
+    //logFile.close();
 
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
@@ -757,12 +746,13 @@ void handleInterrupts(CPU* cpu)
         if ((interruptRequest & 0x01) && (interruptEnable & 0x01))
         {
             // V-Blank Interrupt
-            cpu->IME_flag = false; // Disable further interrupts
-            cpu->writeMemory(0xFF0F, cpu->readMemory(0xFF0F) & ~0x01); // Clear interrupt flag
+            //cpu->writeMemory(0xFF0F, cpu->readMemory(0xFF0F) & ~0x01); // Clear interrupt flag
             cpu->sp -= 2;
             cpu->writeMemory(cpu->sp + 1, (cpu->pc >> 8) & 0xFF);
             cpu->writeMemory(cpu->sp, cpu->pc & 0xFF);
             cpu->pc = 0x0040; // Jump to V-Blank interrupt vector
+            cpu->IME_flag = false; // Disable further interrupts
+            cpu->ram[0xFF0F] &= ~0x01;
         }
 
         else if ((interruptRequest & 0x04) && (interruptEnable & 0x04))  
@@ -779,7 +769,8 @@ void handleInterrupts(CPU* cpu)
         else if ((interruptRequest & 0x10) && (interruptEnable & 0x10))
         {
             cpu->IME_flag = false; // Disable further interrupts
-            cpu->writeMemory(0xFF0F, interruptRequest & ~0x10); // Clear the interrupt flag
+            //cpu->writeMemory(0xFF0F, interruptRequest & ~0x10); // Clear the interrupt flag
+            cpu->ram[0xFF0F] &= ~0x10;
             // Push the current PC onto the stack
             cpu->sp -= 2;
             cpu->writeMemory(cpu->sp + 1, (cpu->pc >> 8) & 0xFF);
