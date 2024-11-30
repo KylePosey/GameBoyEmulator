@@ -1183,11 +1183,13 @@ int LD_76(CPU* cpu)
     cpu->pc++;
     //return 1;
     //FIX BAD ERROR WARN HACK
-    if (cpu->readMemory(0xFFFF) != 0x0 && cpu->readMemory(0xFF0F) != 0x00)
+    uint8_t interrupts = cpu->readMemory(0xFFFF) & cpu->readMemory(0xFF0F);
+
+    if (interrupts)
     {
         cpu->halt = false;
     }
-    else
+    else if (cpu-> IME_flag)
     {
         cpu->halt = true;
     }
@@ -1505,12 +1507,12 @@ int SUB_90(CPU* cpu)
 {
     //SUB A, B
     cpu->pc++;
-    uint16_t result = cpu->a - cpu->b;
-    cpu->a = static_cast<uint8_t>(result);
+    uint8_t result = cpu->a - cpu->b;
+    cpu->a = result;
     cpu->z_flag = (cpu->a == 0);
     cpu->n_flag = true;
-    cpu->h_flag = (((cpu->a & 0x0F) + (cpu->b & 0x0F)) > 0x0F);
-    cpu->c_flag = (result > 0xFF);
+    cpu->h_flag = ((cpu->a & 0x0F) < (cpu->b & 0x0F));
+    cpu->c_flag = (cpu->a < cpu->b);
     return 1;
 }
 int SUB_91(CPU* cpu)

@@ -49,6 +49,9 @@ public:
 	std::vector<byte> full_ram;
 	std::array<byte, 0xFFFF + 1> ram = { 0 };
 
+	uint8_t directionState = 0x0F;
+	uint8_t actionState = 0x0F;
+
 	PPU ppu;
 
 	uint8_t mbc1_mode = 0; // Mode 0: 16Mbit ROM / 8KB RAM, Mode 1: 4Mbit ROM / 32KB RAM
@@ -176,9 +179,53 @@ public:
 		ppu.framebuffer[index] = pixelColor;
 	}
 
+	void parseROMHeader()
+	{
+		if (full_rom.size() < 0x0148)
+		{
+			printf("Error: ROM size (%lu bytes) is too small to contain a valid header!\n", full_rom.size());
+			exit(-1);
+		}
+
+		uint8_t rom_size_code = full_rom[0x0148];
+		uint8_t cart_type = full_rom[0x0147];
+
+		uint32_t expected_rom_size = 32 * 1024 * (1 << rom_size_code); // 32KB * 2^code
+		uint32_t detected_rom_size = full_rom.size();
+
+		if (detected_rom_size != expected_rom_size) {
+			printf("Warning: Detected ROM size (%u) does not match header size (%u)\n",
+				detected_rom_size, expected_rom_size);
+		}
+
+		printf("Cartridge type: 0x%02X, ROM size code: 0x%02X (%u banks)\n",
+			cart_type, rom_size_code, detected_rom_size / 0x4000);
+	}
+
 
 	uint8_t readMemory(uint16_t address)
 	{
+		if (address == 0xFF00) {
+			// Read the Joypad register
+			uint8_t joypadSelect = ram[0xFF00] & 0x30; // Bits 4 and 5 (selection)
+			uint8_t result = 0xFF;
+
+			if (!(joypadSelect & 0x10)) {
+				// Action buttons selected
+				result = (result & 0xF0) | (actionState & 0x0F);
+			}
+			if (!(joypadSelect & 0x20)) {
+				// Direction buttons selected
+				result = (result & 0xF0) | (directionState & 0x0F);
+			}
+
+			// If neither selected, return default (no buttons pressed)
+			if (joypadSelect == 0x30) {
+				result = 0xFF;
+			}
+
+			return result;
+		}
 
 		if ((address == 0xFF85))
 		{
@@ -199,22 +246,32 @@ public:
 			return 0xFF;
 		}
 
-		return ram[address];
-
 		if (address < 0x4000) {
-			// Bank 0 (0x0000 - 0x3FFF) always reads from the first bank of ROM
+			// Bank 0 (0x0000 - 0x3FFF) always reads from bank 0
 			return full_rom[address];
 		}
 		else if (address >= 0x4000 && address < 0x8000) {
 			// Switchable ROM bank (0x4000 - 0x7FFF)
 			uint32_t effective_bank = mbc1_bank1 | (mbc1_bank2 << 5);
+			if (mbc1_mode == 1) effective_bank &= 0x1F;
 			if (effective_bank == 0) effective_bank = 1;  // Bank 0 is not selectable, maps to bank 1
+
 			uint32_t rom_address = (effective_bank * 0x4000) + (address - 0x4000);
+			if (rom_address >= full_rom.size())
+			{
+				printf("Invalid ROM address: 0x%08X (ROM size: %lu)\n", rom_address, full_rom.size());
+				return 0xFF;
+			}
 			return full_rom[rom_address];
 		}
 		else if (address >= 0xA000 && address < 0xC000 && mbc1_ram_enable) {
 			// External RAM (0xA000 - 0xBFFF)
-			uint32_t ram_address = (mbc1_bank2 * 0x2000) + (address - 0xA000);
+			uint32_t ram_bank = (mbc1_mode == 1) ? mbc1_bank2 : 0;
+			uint32_t ram_address = (ram_bank * 0x2000) + (address - 0xA000);
+			if (ram_address >= full_ram.size()) {
+				printf("Invalid RAM address: 0x%08X (RAM size: %lu)\n", ram_address, full_ram.size());
+				return 0xFF; // Open-bus behavior
+			}
 			return full_ram[ram_address];
 		}
 
@@ -224,54 +281,62 @@ public:
 
 	void writeMemory(uint16_t address, uint8_t value)
 	{
-		if (address < 0x8000) return;
+		if (address == 0xFF00) {
+			// Update bits 4 and 5 (selection) and preserve unused bits as 1
+			ram[0xFF00] = (value & 0x30) | 0xCF; // Bits 6-7 and 0-3 default to 1
+			return;
+		}
+
+		if (address < 0x8000)
+		{
+			if (address < 0x2000) {
+				// Enable/Disable RAM
+				mbc1_ram_enable = (value & 0x0A) == 0x0A;
+			}
+			else if (address >= 0x2000 && address < 0x4000) {
+				// ROM Bank Number (5 bits)
+				mbc1_bank1 = value & 0x1F;
+				if (mbc1_bank1 == 0) mbc1_bank1 = 1;  // Bank 0 is not selectable
+				switchROMBank();
+			}
+			else if (address >= 0x4000 && address < 0x6000) {
+				// RAM Bank Number or Upper ROM Bank Bits (2 bits)
+				mbc1_bank2 = value & 0x03;
+				if (mbc1_mode == 0) {
+					switchROMBank();
+				}
+				else {
+					switchRAMBank();
+				}
+			}
+			else if (address >= 0x6000 && address < 0x8000) {
+				// ROM/RAM Mode Select
+				mbc1_mode = value & 0x01;
+			}
+			return;
+		}
 
 		if (value == 0x39)
 		{
-			printf("PC: 0x%04X\n", pc);
+			//printf("PC: 0x%04X\n", pc);
 		}
 
 		if (address == 0xFF46)
 		{
 			performDMATransfer(value);
-			ram[address] = value;
+			//ram[address] = value;
 		}
 
-		ram[address] = value;
-
-		if (address < 0x2000) {
-			// Enable/Disable RAM
-			mbc1_ram_enable = (value & 0x0A) == 0x0A;
-		}
-		else if (address >= 0x2000 && address < 0x4000) {
-			// ROM Bank Number (5 bits)
-			mbc1_bank1 = value & 0x1F;
-			if (mbc1_bank1 == 0) mbc1_bank1 = 1;  // Bank 0 is not selectable
-			switchROMBank();
-		}
-		else if (address >= 0x4000 && address < 0x6000) {
-			// RAM Bank Number or Upper ROM Bank Bits (2 bits)
-			mbc1_bank2 = value & 0x03;
-			if (mbc1_mode == 0) {
-				switchROMBank();
-			}
-			else {
-				switchRAMBank();
-			}
-		}
-		else if (address >= 0x6000 && address < 0x8000) {
-			// ROM/RAM Mode Select
-			mbc1_mode = value & 0x01;
-		}
-		else if (address >= 0xA000 && address < 0xC000 && mbc1_ram_enable) {
+		 if (address >= 0xA000 && address < 0xC000 && mbc1_ram_enable) {
 			// External RAM (0xA000 - 0xBFFF)
-			uint32_t ram_address = (mbc1_bank2 * 0x2000) + (address - 0xA000);
+			 uint32_t ram_bank = (mbc1_mode == 1) ? mbc1_bank2 : 0;
+			uint32_t ram_address = (ram_bank * 0x2000) + (address - 0xA000);
 			full_ram[ram_address] = value;
-		}
-		else {
-			// Handle other memory regions (WRAM, I/O, etc.)
-			ram[address] = value;
-		}
+		 }
+		 else
+		 {
+			 ram[address] = value;
+		 }
 	}
 
 	void switchROMBank() {
@@ -279,6 +344,14 @@ public:
 		uint32_t effective_bank = mbc1_bank1 | (mbc1_bank2 << 5);
 		if (effective_bank == 0) effective_bank = 1; // Bank 0 is not selectable, map to bank 1
 
+		uint32_t max_banks = full_rom.size() / 0x4000;
+		if (effective_bank >= max_banks)
+		{
+			printf("Invalid bank number: %u (clamping to %u)\n", effective_bank, max_banks - 1);
+			effective_bank = max_banks - 1;
+		}
+
+		//printf("Switching to ROM bank: %u\n", effective_bank);
 		// Map ROM bank into 0x4000 - 0x7FFF
 		// This would actually involve setting up your memory view, or handling it in read/write functions
 	}
@@ -286,6 +359,7 @@ public:
 	void switchRAMBank() {
 		// Ensure MBC1 RAM banking mode is selected (mode 1)
 		if (mbc1_mode == 1 && mbc1_ram_enable) {
+			printf("Switching to RAM bank: %u\n", mbc1_bank2);
 			// Map RAM bank into 0xA000 - 0xBFFF
 			// This would be handling it in read/write functions
 		}
